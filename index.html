@@ -1542,6 +1542,14 @@ function importJSONBackup(file){
   reader.readAsText(file);
 }
 
+
+/* ===== SERVICE WORKER REGISTRIERUNG ===== */
+if('serviceWorker' in navigator){
+  navigator.serviceWorker.register('./sw.js', {scope:'./'})
+    .then(()=>console.log('Service Worker registriert'))
+    .catch(e=>console.warn('SW Fehler:', e));
+}
+
 /* ===== BOOT ===== */
 (async function init(){
   db=await openDB();
