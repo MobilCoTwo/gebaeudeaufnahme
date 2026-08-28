@@ -707,26 +707,84 @@ function renderGrundriss(){
     const defs=document.createElementNS('http://www.w3.org/2000/svg','defs');
     svg.appendChild(defs);
 
-    // 1) Gespeicherte Polygone
-    fl.grundriss.polygone.forEach((poly,pi)=>{
+    // 1) Layer 1: Wohnungspolygone (unten)
+    // Layer 2: Raumpolygone (oben)
+    // Nur der Beschriftungstext ist klickbar; Polygon-Fläche ist nie klickbar.
+
+    // Hilfsfunktion: Außenlabel-Position für Wohnungen berechnen.
+    // Strategie: teste alle 4 Richtungen (links, rechts, unten, oben) ausgehend
+    // vom Schwerpunkt. Wähle die Richtung, in der keine andere Wohnungsfläche liegt.
+    const wohnungPolygone = fl.grundriss.polygone.filter(p=>p.typ==='wohnung');
+
+    function pointInPolygon(px, py, punkte){
+      let inside=false;
+      for(let i=0,j=punkte.length-1;i<punkte.length;j=i++){
+        const xi=punkte[i].x, yi=punkte[i].y;
+        const xj=punkte[j].x, yj=punkte[j].y;
+        if(((yi>py)!==(yj>py))&&(px<(xj-xi)*(py-yi)/(yj-yi)+xi)) inside=!inside;
+      }
+      return inside;
+    }
+
+    function labelPosWohnung(poly){
+      const punkte=poly.punkte;
+      const cx=punkte.reduce((s,p)=>s+p.x,0)/punkte.length;
+      const cy=punkte.reduce((s,p)=>s+p.y,0)/punkte.length;
+
+      // Bounding-Box des Polygons
+      const minX=Math.min(...punkte.map(p=>p.x));
+      const maxX=Math.max(...punkte.map(p=>p.x));
+      const minY=Math.min(...punkte.map(p=>p.y));
+      const maxY=Math.max(...punkte.map(p=>p.y));
+      const w=maxX-minX, h=maxY-minY;
+      const margin=0.06; // Abstand außerhalb (in 0-1 Koordinaten)
+
+      // Kandidaten: links, rechts, unten, oben
+      const candidates=[
+        {tx: minX-margin,  ty: cy,          anchor:'end',    key:'left'},
+        {tx: maxX+margin,  ty: cy,          anchor:'start',  key:'right'},
+        {tx: cx,           ty: maxY+margin, anchor:'middle', key:'bottom'},
+        {tx: cx,           ty: minY-margin, anchor:'middle', key:'top'},
+      ];
+
+      // Andere Wohnungspolygone
+      const others=wohnungPolygone.filter(p=>p.id!==poly.id);
+
+      for(const cand of candidates){
+        // Ist der Kandidatenpunkt in einem anderen Wohnungspolygon?
+        const blocked=others.some(o=>pointInPolygon(cand.tx, cand.ty, o.punkte));
+        // Auch prüfen: liegt der Punkt noch im Bild (0-1)?
+        const inBounds=cand.tx>=-0.05&&cand.tx<=1.05&&cand.ty>=-0.05&&cand.ty<=1.05;
+        if(!blocked && inBounds) return cand;
+      }
+      // Fallback: Schwerpunkt innen
+      return {tx:cx, ty:cy, anchor:'middle', key:'center'};
+    }
+
+    function drawPoly(poly){
       if(poly.punkte.length<2) return;
-      const pts=poly.punkte.map(p=>p.x*100+'% '+p.y*100+'%').join(', ');
 
       const polygon=document.createElementNS('http://www.w3.org/2000/svg','polygon');
       polygon.setAttribute('points', poly.punkte.map(p=>`${p.x*10000} ${p.y*10000}`).join(' '));
-      // We use a viewBox trick: use unitless coords scaled 0-10000
-      polygon.setAttribute('fill', poly.farbe+(poly.typ==='raum'?'40':'55'));
-      polygon.setAttribute('stroke', poly.farbe);
-      polygon.setAttribute('stroke-width', poly.typ==='raum'?'60':'80');
+      // Polygon NIEMALS klickbar – nur Text ist klickbar
+      polygon.setAttribute('pointer-events','none');
+      if(poly.typ==='wohnung'){
+        polygon.setAttribute('fill', poly.farbe+'33');
+        polygon.setAttribute('stroke', poly.farbe);
+        polygon.setAttribute('stroke-width','100');
+      } else {
+        polygon.setAttribute('fill', poly.farbe+'55');
+        polygon.setAttribute('stroke', poly.farbe);
+        polygon.setAttribute('stroke-width','55');
+        polygon.setAttribute('stroke-dasharray','200 80');
+      }
       polygon.setAttribute('stroke-linejoin','round');
-      polygon.style.cursor='pointer';
       svg.appendChild(polygon);
 
-      // Label: centroid
       const cx=poly.punkte.reduce((s,p)=>s+p.x,0)/poly.punkte.length;
       const cy=poly.punkte.reduce((s,p)=>s+p.y,0)/poly.punkte.length;
 
-      let label=poly.typ==='wohnung'?'?':'?';
+      let label='?';
       fl.apartments.forEach(ap=>{
         if(ap.id===poly.wohnungId){
           if(poly.typ==='wohnung') label=ap.name;
@@ -734,32 +792,40 @@ function renderGrundriss(){
         }
       });
 
+      let tx=cx, ty=cy, anchor='middle';
+      if(poly.typ==='wohnung'){
+        const pos=labelPosWohnung(poly);
+        tx=pos.tx; ty=pos.ty; anchor=pos.anchor;
+      }
+
       const txt=document.createElementNS('http://www.w3.org/2000/svg','text');
-      txt.setAttribute('x', cx*10000);
-      txt.setAttribute('y', cy*10000);
-      txt.setAttribute('text-anchor','middle');
+      txt.setAttribute('x', tx*10000);
+      txt.setAttribute('y', ty*10000);
+      txt.setAttribute('text-anchor', anchor);
       txt.setAttribute('dominant-baseline','middle');
       txt.setAttribute('fill', poly.farbe);
-      txt.setAttribute('font-size', poly.typ==='raum'?'280':'340');
+      txt.setAttribute('font-size', poly.typ==='raum'?'260':'300');
       txt.setAttribute('font-weight','700');
       txt.setAttribute('font-family','-apple-system,BlinkMacSystemFont,sans-serif');
       txt.setAttribute('paint-order','stroke');
-      txt.setAttribute('stroke','rgba(255,255,255,0.85)');
-      txt.setAttribute('stroke-width','120');
+      txt.setAttribute('stroke','rgba(255,255,255,0.95)');
+      txt.setAttribute('stroke-width', poly.typ==='raum'?'100':'140');
       txt.setAttribute('stroke-linejoin','round');
+      txt.setAttribute('pointer-events','all');
       txt.textContent=label;
       txt.style.cursor='pointer';
       svg.appendChild(txt);
 
-      // Click → popup
-      [polygon,txt].forEach(el=>{
-        el.addEventListener('click',e=>{
-          e.stopPropagation();
-          if(drawMode) return;
-          showPolyPopup(poly,cx,cy);
-        });
+      txt.addEventListener('click',e=>{
+        e.stopPropagation();
+        if(drawMode) return;
+        showPolyPopup(poly,cx,cy);
       });
-    });
+    }
+    // Erst alle Wohnungen zeichnen (Layer 1)
+    wohnungPolygone.forEach(drawPoly);
+    // Dann alle Räume obendrüber (Layer 2)
+    fl.grundriss.polygone.filter(p=>p.typ==='raum').forEach(drawPoly);
 
     // 2) Laufende Zeichnung
     if(drawMode && drawPunkte.length>0){
@@ -811,7 +877,7 @@ function renderGrundriss(){
       popup.appendChild(h('div',{style:'font-weight:700;font-size:15px;margin-bottom:4px;'},ap2.name));
       popup.appendChild(h('div',{style:'font-size:12px;color:var(--muted);margin-bottom:10px;'},'Wohnung'));
       popup.appendChild(h('div',{class:'btn-row',style:'gap:6px;'},[
-        h('button',{class:'btn btn-primary',style:'flex:1;padding:8px;font-size:13px;',onclick:()=>{ nav.aptId=ap2.id; nav.view='rooms'; render(); }},'Räume'),
+        h('button',{class:'btn btn-primary',style:'flex:1;padding:8px;font-size:13px;',onclick:()=>{ popup.remove(); nav.aptId=ap2.id; nav.view='rooms'; render(); }},'Räume'),
         h('button',{class:'btn btn-ghost',style:'flex:0;padding:8px;font-size:13px;',onclick:()=>{ fl.grundriss.polygone=fl.grundriss.polygone.filter(p=>p.id!==poly.id); save(); popup.remove(); redraw(); }},'🗑')
       ]));
     } else if(poly.typ==='raum' && rm2){
@@ -820,12 +886,14 @@ function renderGrundriss(){
       popup.appendChild(h('div',{style:'font-size:12px;color:var(--muted);margin-bottom:6px;'},ap2?.name||''));
       popup.appendChild(h('div',{style:'font-size:12px;margin-bottom:10px;'},hk+' HK · '+fe+' FE'+(ph2?' · '+ph2+' Foto'+(ph2===1?'':'s'):'')+(ft?' · ⚠️'+ft:'')));
       popup.appendChild(h('div',{class:'btn-row',style:'gap:6px;'},[
-        h('button',{class:'btn btn-primary',style:'flex:1;padding:8px;font-size:13px;',onclick:()=>{ nav.aptId=ap2.id; nav.roomId=rm2.id; nav.view='room'; render(); }},'Öffnen'),
+        h('button',{class:'btn btn-primary',style:'flex:1;padding:8px;font-size:13px;',onclick:()=>{ popup.remove(); nav.aptId=ap2.id; nav.roomId=rm2.id; nav.view='room'; render(); }},'Öffnen'),
         h('button',{class:'btn btn-ghost',style:'flex:0;padding:8px;font-size:13px;',onclick:()=>{ fl.grundriss.polygone=fl.grundriss.polygone.filter(p=>p.id!==poly.id); save(); popup.remove(); redraw(); }},'🗑')
       ]));
     }
     wrap.appendChild(popup);
-    setTimeout(()=>document.addEventListener('click',()=>popup.remove(),{once:true}),0);
+    // Popup schließen bei Klick außerhalb – stopPropagation im Popup verhindert Selbstauslösung
+    popup.addEventListener('click', e=>e.stopPropagation());
+    setTimeout(()=>document.addEventListener('click', ()=>{ popup.remove(); }, {once:true}), 50);
   }
 
   function startDrawMode(target){
@@ -878,45 +946,106 @@ function renderGrundriss(){
   /* ---- Toolbar ---- */
   const statusBar=h('div',{style:'font-size:13px;color:var(--muted);padding:8px 12px;background:var(--panel);border:1px solid var(--line);border-radius:10px;margin-bottom:10px;text-align:center;'},'Polygon antippen → Details · „+ Wohnung" oder „+ Raum" zum Einzeichnen');
 
+  // Layer-Info Badge
+  const layerBadge=h('div',{style:'display:flex;gap:8px;align-items:center;justify-content:center;margin-bottom:8px;font-size:12px;flex-wrap:wrap;'},[
+    h('span',{style:'display:inline-flex;align-items:center;gap:4px;background:rgba(28,84,77,0.12);border:2px solid #1c544d;border-radius:8px;padding:3px 10px;font-weight:600;color:#1c544d;'},
+      [h('span',{},'▬'), h('span',{},'Layer 1: Wohnungen')]),
+    h('span',{style:'display:inline-flex;align-items:center;gap:4px;background:rgba(28,84,77,0.22);border:2px dashed #1c544d;border-radius:8px;padding:3px 10px;font-weight:600;color:#1c544d;'},
+      [h('span',{},'┄'), h('span',{},'Layer 2: Räume (darüber)')])
+  ]);
+
   function pickAndDrawWohnung(){
-    if(fl.apartments.length===0){ toast('Zuerst Wohnungen anlegen.'); return; }
     const overlay2=h('div',{class:'modal-overlay'});
     const m2=h('div',{class:'modal'});
     m2.appendChild(h('h2',{},'Wohnung einzeichnen'));
-    const sel=h('select',{style:'width:100%;padding:13px;font-size:16px;border:1.5px solid var(--line);border-radius:10px;margin-bottom:16px;'});
-    fl.apartments.forEach((ap,i)=>sel.appendChild(h('option',{value:ap.id+'::'+i},ap.name)));
-    m2.appendChild(sel);
-    m2.appendChild(h('div',{class:'btn-row'},[
-      h('button',{class:'btn btn-ghost',onclick:()=>overlay2.remove()},'Abbrechen'),
-      h('button',{class:'btn btn-primary',onclick:()=>{
+
+    // Neu-anlegen-Bereich
+    const neuSection=h('div',{style:'margin-bottom:14px;border:1.5px dashed var(--line);border-radius:10px;padding:12px;'});
+    neuSection.appendChild(h('div',{style:'font-size:12px;color:var(--muted);margin-bottom:8px;font-weight:600;'},'NEUE WOHNUNG ANLEGEN'));
+    const neuInput=h('input',{type:'text',placeholder:'z. B. Wohnung 1, links …',style:'width:100%;padding:11px;font-size:15px;border:1.5px solid var(--line);border-radius:8px;margin-bottom:8px;box-sizing:border-box;'});
+    neuSection.appendChild(neuInput);
+    neuSection.appendChild(h('button',{class:'btn btn-primary',style:'width:100%;',onclick:()=>{
+      const name=neuInput.value.trim();
+      if(!name){ neuInput.focus(); return; }
+      const newAp={id:uid(),name,lueftung:{typ:'',wrg:false,abluftraeume:'',notiz:'',fotos:[]},rooms:[]};
+      fl.apartments.push(newAp);
+      save();
+      overlay2.remove();
+      const idx=fl.apartments.length-1;
+      startDrawMode({typ:'wohnung',wohnungId:newAp.id,raumId:null,farbe:grundrissPolyColor(idx)});
+    }},'+ Anlegen & einzeichnen'));
+    m2.appendChild(neuSection);
+
+    // Bestehende Wohnungen
+    if(fl.apartments.length>0){
+      m2.appendChild(h('div',{style:'font-size:12px;color:var(--muted);margin-bottom:8px;font-weight:600;'},'BESTEHENDE WOHNUNG'));
+      const sel=h('select',{style:'width:100%;padding:13px;font-size:16px;border:1.5px solid var(--line);border-radius:10px;margin-bottom:12px;'});
+      fl.apartments.forEach((ap,i)=>sel.appendChild(h('option',{value:ap.id+'::'+i},ap.name)));
+      m2.appendChild(sel);
+      m2.appendChild(h('button',{class:'btn btn-outline',style:'width:100%;margin-bottom:8px;',onclick:()=>{
         const [aid,idx]=sel.value.split('::');
         overlay2.remove();
         startDrawMode({typ:'wohnung',wohnungId:aid,raumId:null,farbe:grundrissPolyColor(parseInt(idx))});
-      }},'Einzeichnen')
-    ]));
+      }},'Einzeichnen'));
+    }
+
+    m2.appendChild(h('button',{class:'btn btn-ghost',style:'width:100%;',onclick:()=>overlay2.remove()},'Abbrechen'));
     overlay2.appendChild(m2); document.body.appendChild(overlay2);
+    setTimeout(()=>neuInput.focus(),100);
   }
 
   function pickAndDrawRaum(){
-    const rooms=[];
-    fl.apartments.forEach((ap,ai)=>ap.rooms.forEach((rm,ri)=>rooms.push({ap,rm,ai,ri})));
-    if(rooms.length===0){ toast('Zuerst Räume anlegen.'); return; }
     const overlay2=h('div',{class:'modal-overlay'});
     const m2=h('div',{class:'modal'});
     m2.appendChild(h('h2',{},'Raum einzeichnen'));
-    const sel=h('select',{style:'width:100%;padding:13px;font-size:16px;border:1.5px solid var(--line);border-radius:10px;margin-bottom:16px;'});
-    rooms.forEach(({ap,rm,ai,ri})=>sel.appendChild(h('option',{value:ap.id+'::'+rm.id+'::'+ai+'::'+ri},ap.name+' → '+rm.name)));
-    m2.appendChild(sel);
-    m2.appendChild(h('div',{class:'btn-row'},[
-      h('button',{class:'btn btn-ghost',onclick:()=>overlay2.remove()},'Abbrechen'),
-      h('button',{class:'btn btn-primary',onclick:()=>{
-        const [aid,rid,ai,ri]=sel.value.split('::');
-        // room color = apartment color lightened via opacity
+
+    // Neu-anlegen-Bereich
+    const neuSection=h('div',{style:'margin-bottom:14px;border:1.5px dashed var(--line);border-radius:10px;padding:12px;'});
+    neuSection.appendChild(h('div',{style:'font-size:12px;color:var(--muted);margin-bottom:8px;font-weight:600;'},'NEUEN RAUM ANLEGEN'));
+    const neuName=h('input',{type:'text',placeholder:'Raumname, z. B. Wohnzimmer',style:'width:100%;padding:11px;font-size:15px;border:1.5px solid var(--line);border-radius:8px;margin-bottom:8px;box-sizing:border-box;'});
+    neuSection.appendChild(neuName);
+    // Wohnung-Auswahl für neuen Raum
+    const neuAptSel=h('select',{style:'width:100%;padding:11px;font-size:15px;border:1.5px solid var(--line);border-radius:8px;margin-bottom:8px;'});
+    if(fl.apartments.length===0){
+      neuAptSel.appendChild(h('option',{value:''},'– erst Wohnungen anlegen –'));
+      neuAptSel.disabled=true;
+    } else {
+      fl.apartments.forEach((ap,i)=>neuAptSel.appendChild(h('option',{value:ap.id+'::'+i},ap.name)));
+    }
+    neuSection.appendChild(neuAptSel);
+    neuSection.appendChild(h('button',{class:'btn btn-primary',style:'width:100%;',onclick:()=>{
+      const name=neuName.value.trim();
+      if(!name){ neuName.focus(); return; }
+      if(!neuAptSel.value){ toast('Bitte Wohnung wählen.'); return; }
+      const [aid,ai]=neuAptSel.value.split('::');
+      const ap=fl.apartments.find(a=>a.id===aid);
+      if(!ap) return;
+      const newRm={id:uid(),name,radiators:[],windows:[],feuchte:[],photos:[]};
+      ap.rooms.push(newRm);
+      save();
+      overlay2.remove();
+      startDrawMode({typ:'raum',wohnungId:aid,raumId:newRm.id,farbe:grundrissPolyColor(parseInt(ai))});
+    }},'+ Anlegen & einzeichnen'));
+    m2.appendChild(neuSection);
+
+    // Bestehende Räume
+    const rooms=[];
+    fl.apartments.forEach((ap,ai)=>ap.rooms.forEach((rm,ri)=>rooms.push({ap,rm,ai,ri})));
+    if(rooms.length>0){
+      m2.appendChild(h('div',{style:'font-size:12px;color:var(--muted);margin-bottom:8px;font-weight:600;'},'BESTEHENDEN RAUM EINZEICHNEN'));
+      const sel=h('select',{style:'width:100%;padding:13px;font-size:16px;border:1.5px solid var(--line);border-radius:10px;margin-bottom:12px;'});
+      rooms.forEach(({ap,rm,ai,ri})=>sel.appendChild(h('option',{value:ap.id+'::'+rm.id+'::'+ai+'::'+ri},ap.name+' → '+rm.name)));
+      m2.appendChild(sel);
+      m2.appendChild(h('button',{class:'btn btn-outline',style:'width:100%;margin-bottom:8px;',onclick:()=>{
+        const [aid,rid,ai]=sel.value.split('::');
         overlay2.remove();
         startDrawMode({typ:'raum',wohnungId:aid,raumId:rid,farbe:grundrissPolyColor(parseInt(ai))});
-      }},'Einzeichnen')
-    ]));
+      }},'Einzeichnen'));
+    }
+
+    m2.appendChild(h('button',{class:'btn btn-ghost',style:'width:100%;',onclick:()=>overlay2.remove()},'Abbrechen'));
     overlay2.appendChild(m2); document.body.appendChild(overlay2);
+    setTimeout(()=>neuName.focus(),100);
   }
 
   const btnDraw=h('button',{class:'btn btn-primary',style:'flex:1;',onclick:pickAndDrawWohnung},'+ Wohnung');
@@ -943,6 +1072,7 @@ function renderGrundriss(){
     });
   }
 
+  main.appendChild(layerBadge);
   main.appendChild(statusBar);
   main.appendChild(toolbar);
   main.appendChild(wrap);
