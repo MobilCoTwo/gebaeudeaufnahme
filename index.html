@@ -301,6 +301,39 @@ function h(tag,attrs={},children=[]){
   });
   return el;
 }
+
+  // Stockwerk-Sortierung: UG absteigend → EG → OG aufsteigend → DG aufsteigend
+  function floorSortKey(name){
+    const n=name.trim().toLowerCase();
+    // Untergeschoss: n.UG oder ntes Untergeschoss
+    let m=n.match(/^(\d+)\.?\s*ug|^(\d+)\.?\s*unter/);
+    if(m){ const num=parseInt(m[1]||m[2]); return [0, -num]; }
+    // Kellergeschoss
+    if(n.match(/keller|kg/)) return [0,-999];
+    // Erdgeschoss
+    if(n.match(/^eg|^erd/)) return [1,0];
+    // Obergeschoss: n.OG
+    m=n.match(/^(\d+)\.?\s*og|^(\d+)\.?\s*ober/);
+    if(m){ const num=parseInt(m[1]||m[2]); return [2,num]; }
+    // Dachgeschoss: n.DG
+    m=n.match(/^(\d+)\.?\s*dg|^(\d+)\.?\s*dach/);
+    if(m){ const num=parseInt(m[1]||m[2]); return [3,num]; }
+    if(n.match(/dach|dg/)) return [3,0];
+    // Unbekannt: hinten alphabetisch
+    return [4,0,name];
+  }
+  function sortFloors(floors){
+    return [...floors].sort((a,b)=>{
+      const ka=floorSortKey(a.name), kb=floorSortKey(b.name);
+      for(let i=0;i<Math.max(ka.length,kb.length);i++){
+        const av=ka[i]??'', bv=kb[i]??'';
+        if(av<bv) return -1;
+        if(av>bv) return 1;
+      }
+      return 0;
+    });
+  }
+
 function toast(msg){ const t=h('div',{class:'toast'},msg); document.body.appendChild(t); setTimeout(()=>t.remove(),2400); }
 
 /* ---------- Shared UI components ---------- */
@@ -609,24 +642,63 @@ function renderFloors(){
     main.appendChild(h('div',{class:'empty'},[h('div',{class:'big'},'🏢'),h('p',{},'Mit „+ Stockwerk" starten.')]));
   } else {
     const list=h('div',{class:'list'});
-    state.floors.forEach(fl=>{
+    sortFloors(state.floors).forEach(fl=>{
       const aptCount=fl.apartments.length;
       const hasGrundriss=!!(fl.grundriss?.bild);
-      list.appendChild(h('div',{class:'card tappable',onclick:()=>{nav.floorId=fl.id;nav.view='apartments';render();}},[
-        h('div',{class:'main'},[
-          h('div',{class:'name'},fl.name),
-          h('div',{class:'sub'},aptCount+' Wohnung'+(aptCount===1?'':'en')+(hasGrundriss?' · 📐 Grundriss':''))
-        ]),
-        h('button',{class:'del-x',onclick:e=>{ e.stopPropagation(); confirmDelete('Stockwerk „'+fl.name+'" löschen?',()=>{ state.floors=state.floors.filter(x=>x.id!==fl.id); save(); render(); }); }},'✕'),
-        h('div',{class:'chev'},'›')
-      ]));
+      const flCard=h('div',{class:'card tappable',onclick:()=>{nav.floorId=fl.id;nav.view='apartments';render();}});
+      flCard.appendChild(h('div',{class:'main'},[h('div',{class:'name'},fl.name),h('div',{class:'sub'},aptCount+' Wohnung'+(aptCount===1?'':'en')+(fl.grundriss?.bild?' · Grundriss':''))]));
+      flCard.appendChild(h('button',{class:'del-x',style:'color:var(--forest);',onclick:e=>{ e.stopPropagation(); promptText('Stockwerk umbenennen','',n=>{ if(n){fl.name=n;save();render();} }); }},'✏'));
+      flCard.appendChild(h('button',{class:'del-x',onclick:e=>{ e.stopPropagation(); confirmDelete('Stockwerk „'+fl.name+'“ löschen?',()=>{ state.floors=state.floors.filter(x=>x.id!==fl.id); save(); render(); }); }},'✕'));
+      flCard.appendChild(h('div',{class:'chev'},'›'));
+      list.appendChild(flCard);
     });
     main.appendChild(list);
   }
   app.appendChild(main);
   app.appendChild(h('div',{class:'addbar'},[
     h('div',{class:'btn-row',style:'margin-bottom:10px;'},[
-      h('button',{class:'btn btn-primary',onclick:()=>promptText('Neues Stockwerk','z. B. Erdgeschoss, 1. OG …',name=>{ state.floors.push({id:uid(),name,grundriss:{bild:null,polygone:[]},huelle:{wand:{fotos:[]},dach:{fotos:[]},keller:{fotos:[]}},apartments:[]}); save(); render(); })},'+ Stockwerk'),
+      h('button',{class:'btn btn-primary',onclick:()=>{
+        const overlay=h('div',{class:'modal-overlay'});
+        const m=h('div',{class:'modal'});
+        m.appendChild(h('h2',{},'Neues Stockwerk'));
+        const nameIn=h('input',{type:'text',placeholder:'z. B. Erdgeschoss, 1. OG …',style:'width:100%;padding:11px;font-size:15px;border:1.5px solid var(--line);border-radius:8px;margin-bottom:10px;box-sizing:border-box;'});
+        m.appendChild(nameIn);
+        m.appendChild(h('button',{class:'btn btn-primary',style:'width:100%;margin-bottom:14px;',onclick:()=>{
+          const name=nameIn.value.trim(); if(!name){nameIn.focus();return;}
+          state.floors.push({id:uid(),name,grundriss:{bild:null,polygone:[]},huelle:{wand:{fotos:[]},dach:{fotos:[]},keller:{fotos:[]}},apartments:[]});
+          save(); overlay.remove(); render();
+        }},'Leeres Stockwerk anlegen'));
+        if(state.floors.length>0){
+          m.appendChild(h('div',{style:'font-size:12px;color:var(--muted);margin-bottom:8px;font-weight:600;'},'ODER BESTEHENDES KOPIEREN'));
+          const copyIn=h('input',{type:'text',placeholder:'Name des neuen Stockwerks …',style:'width:100%;padding:11px;font-size:15px;border:1.5px solid var(--line);border-radius:8px;margin-bottom:8px;box-sizing:border-box;'});
+          m.appendChild(copyIn);
+          const copySel=h('select',{style:'width:100%;padding:11px;font-size:15px;border:1.5px solid var(--line);border-radius:8px;margin-bottom:10px;'});
+          state.floors.forEach(fl=>copySel.appendChild(h('option',{value:fl.id},fl.name)));
+          m.appendChild(copySel);
+          m.appendChild(h('div',{style:'font-size:12px;color:var(--muted);margin-bottom:8px;'},'Kopiert Wohnungen, Räume, Grundriss und Lüftungstypen – ohne Fotos und Messwerte.'));
+          m.appendChild(h('button',{class:'btn btn-outline',style:'width:100%;margin-bottom:8px;',onclick:()=>{
+            const name=copyIn.value.trim(); if(!name){copyIn.focus();return;}
+            const src=state.floors.find(f=>f.id===copySel.value); if(!src)return;
+            // Grundriss-Polygone kopieren (neue IDs, Bild übernehmen)
+            const aptIdMap={};
+            const rmIdMap={};
+            const newApts=src.apartments.map(ap=>{
+              const newId=uid(); aptIdMap[ap.id]=newId;
+              return {id:newId,name:ap.name,lueftung:{typ:ap.lueftung?.typ||'',wrg:ap.lueftung?.wrg||false,abluftraeume:ap.lueftung?.abluftraeume||'',notiz:ap.lueftung?.notiz||'',fotos:[]},
+                rooms:ap.rooms.map(rm=>{ const rId=uid(); rmIdMap[rm.id]=rId; return {id:rId,name:rm.name,radiators:[],windows:[],feuchte:[],photos:[]}; })};
+            });
+            const newPolygone=(src.grundriss?.polygone||[]).map(p=>({...p,id:uid(),wohnungId:aptIdMap[p.wohnungId]||p.wohnungId,raumId:p.raumId?rmIdMap[p.raumId]||p.raumId:null}));
+            const newFloor={id:uid(),name,
+              grundriss:{bild:src.grundriss?.bild||null,polygone:newPolygone},
+              huelle:{wand:{fotos:[]},dach:{fotos:[]},keller:{fotos:[]}},
+              apartments:newApts};
+            state.floors.push(newFloor); save(); overlay.remove(); render();
+          }},'Kopieren & anlegen'));
+        }
+        m.appendChild(h('button',{class:'btn btn-ghost',style:'width:100%;',onclick:()=>overlay.remove()},'Abbrechen'));
+        overlay.appendChild(m); document.body.appendChild(overlay);
+        setTimeout(()=>nameIn.focus(),100);
+      }},'+ Stockwerk'),
       h('button',{class:'btn btn-outline',onclick:()=>{nav.view='settings';render();}},'⬇︎ Export')
     ])
   ]));
@@ -707,20 +779,14 @@ function renderGrundriss(){
     const defs=document.createElementNS('http://www.w3.org/2000/svg','defs');
     svg.appendChild(defs);
 
-    // 1) Layer 1: Wohnungspolygone (unten)
-    // Layer 2: Raumpolygone (oben)
-    // Nur der Beschriftungstext ist klickbar; Polygon-Fläche ist nie klickbar.
-
-    // Hilfsfunktion: Außenlabel-Position für Wohnungen berechnen.
-    // Strategie: teste alle 4 Richtungen (links, rechts, unten, oben) ausgehend
-    // vom Schwerpunkt. Wähle die Richtung, in der keine andere Wohnungsfläche liegt.
+    // Layer 1: Wohnungen (unten), Layer 2: Räume (oben)
+    // Nur Text ist klickbar; Polygon nie klickbar
     const wohnungPolygone = fl.grundriss.polygone.filter(p=>p.typ==='wohnung');
 
     function pointInPolygon(px, py, punkte){
       let inside=false;
       for(let i=0,j=punkte.length-1;i<punkte.length;j=i++){
-        const xi=punkte[i].x, yi=punkte[i].y;
-        const xj=punkte[j].x, yj=punkte[j].y;
+        const xi=punkte[i].x, yi=punkte[i].y, xj=punkte[j].x, yj=punkte[j].y;
         if(((yi>py)!==(yj>py))&&(px<(xj-xi)*(py-yi)/(yj-yi)+xi)) inside=!inside;
       }
       return inside;
@@ -730,43 +796,28 @@ function renderGrundriss(){
       const punkte=poly.punkte;
       const cx=punkte.reduce((s,p)=>s+p.x,0)/punkte.length;
       const cy=punkte.reduce((s,p)=>s+p.y,0)/punkte.length;
-
-      // Bounding-Box des Polygons
-      const minX=Math.min(...punkte.map(p=>p.x));
-      const maxX=Math.max(...punkte.map(p=>p.x));
-      const minY=Math.min(...punkte.map(p=>p.y));
-      const maxY=Math.max(...punkte.map(p=>p.y));
-      const w=maxX-minX, h=maxY-minY;
-      const margin=0.06; // Abstand außerhalb (in 0-1 Koordinaten)
-
-      // Kandidaten: links, rechts, unten, oben
+      const minX=Math.min(...punkte.map(p=>p.x)), maxX=Math.max(...punkte.map(p=>p.x));
+      const minY=Math.min(...punkte.map(p=>p.y)), maxY=Math.max(...punkte.map(p=>p.y));
+      const margin=0.06;
       const candidates=[
-        {tx: minX-margin,  ty: cy,          anchor:'end',    key:'left'},
-        {tx: maxX+margin,  ty: cy,          anchor:'start',  key:'right'},
-        {tx: cx,           ty: maxY+margin, anchor:'middle', key:'bottom'},
-        {tx: cx,           ty: minY-margin, anchor:'middle', key:'top'},
+        {tx:minX-margin, ty:cy,          anchor:'end',    key:'left'},
+        {tx:maxX+margin, ty:cy,          anchor:'start',  key:'right'},
+        {tx:cx,          ty:maxY+margin, anchor:'middle', key:'bottom'},
+        {tx:cx,          ty:minY-margin, anchor:'middle', key:'top'},
       ];
-
-      // Andere Wohnungspolygone
       const others=wohnungPolygone.filter(p=>p.id!==poly.id);
-
       for(const cand of candidates){
-        // Ist der Kandidatenpunkt in einem anderen Wohnungspolygon?
-        const blocked=others.some(o=>pointInPolygon(cand.tx, cand.ty, o.punkte));
-        // Auch prüfen: liegt der Punkt noch im Bild (0-1)?
+        const blocked=others.some(o=>pointInPolygon(cand.tx,cand.ty,o.punkte));
         const inBounds=cand.tx>=-0.05&&cand.tx<=1.05&&cand.ty>=-0.05&&cand.ty<=1.05;
-        if(!blocked && inBounds) return cand;
+        if(!blocked&&inBounds) return cand;
       }
-      // Fallback: Schwerpunkt innen
-      return {tx:cx, ty:cy, anchor:'middle', key:'center'};
+      return {tx:cx,ty:cy,anchor:'middle',key:'center'};
     }
 
     function drawPoly(poly){
       if(poly.punkte.length<2) return;
-
       const polygon=document.createElementNS('http://www.w3.org/2000/svg','polygon');
       polygon.setAttribute('points', poly.punkte.map(p=>`${p.x*10000} ${p.y*10000}`).join(' '));
-      // Polygon NIEMALS klickbar – nur Text ist klickbar
       polygon.setAttribute('pointer-events','none');
       if(poly.typ==='wohnung'){
         polygon.setAttribute('fill', poly.farbe+'33');
@@ -783,7 +834,6 @@ function renderGrundriss(){
 
       const cx=poly.punkte.reduce((s,p)=>s+p.x,0)/poly.punkte.length;
       const cy=poly.punkte.reduce((s,p)=>s+p.y,0)/poly.punkte.length;
-
       let label='?';
       fl.apartments.forEach(ap=>{
         if(ap.id===poly.wohnungId){
@@ -793,10 +843,7 @@ function renderGrundriss(){
       });
 
       let tx=cx, ty=cy, anchor='middle';
-      if(poly.typ==='wohnung'){
-        const pos=labelPosWohnung(poly);
-        tx=pos.tx; ty=pos.ty; anchor=pos.anchor;
-      }
+      if(poly.typ==='wohnung'){ const pos=labelPosWohnung(poly); tx=pos.tx; ty=pos.ty; anchor=pos.anchor; }
 
       const txt=document.createElementNS('http://www.w3.org/2000/svg','text');
       txt.setAttribute('x', tx*10000);
@@ -815,16 +862,13 @@ function renderGrundriss(){
       txt.textContent=label;
       txt.style.cursor='pointer';
       svg.appendChild(txt);
-
       txt.addEventListener('click',e=>{
         e.stopPropagation();
         if(drawMode) return;
         showPolyPopup(poly,cx,cy);
       });
     }
-    // Erst alle Wohnungen zeichnen (Layer 1)
     wohnungPolygone.forEach(drawPoly);
-    // Dann alle Räume obendrüber (Layer 2)
     fl.grundriss.polygone.filter(p=>p.typ==='raum').forEach(drawPoly);
 
     // 2) Laufende Zeichnung
@@ -891,7 +935,6 @@ function renderGrundriss(){
       ]));
     }
     wrap.appendChild(popup);
-    // Popup schließen bei Klick außerhalb – stopPropagation im Popup verhindert Selbstauslösung
     popup.addEventListener('click', e=>e.stopPropagation());
     setTimeout(()=>document.addEventListener('click', ()=>{ popup.remove(); }, {once:true}), 50);
   }
@@ -946,49 +989,32 @@ function renderGrundriss(){
   /* ---- Toolbar ---- */
   const statusBar=h('div',{style:'font-size:13px;color:var(--muted);padding:8px 12px;background:var(--panel);border:1px solid var(--line);border-radius:10px;margin-bottom:10px;text-align:center;'},'Polygon antippen → Details · „+ Wohnung" oder „+ Raum" zum Einzeichnen');
 
-  // Layer-Info Badge
-  const layerBadge=h('div',{style:'display:flex;gap:8px;align-items:center;justify-content:center;margin-bottom:8px;font-size:12px;flex-wrap:wrap;'},[
-    h('span',{style:'display:inline-flex;align-items:center;gap:4px;background:rgba(28,84,77,0.12);border:2px solid #1c544d;border-radius:8px;padding:3px 10px;font-weight:600;color:#1c544d;'},
-      [h('span',{},'▬'), h('span',{},'Layer 1: Wohnungen')]),
-    h('span',{style:'display:inline-flex;align-items:center;gap:4px;background:rgba(28,84,77,0.22);border:2px dashed #1c544d;border-radius:8px;padding:3px 10px;font-weight:600;color:#1c544d;'},
-      [h('span',{},'┄'), h('span',{},'Layer 2: Räume (darüber)')])
-  ]);
-
   function pickAndDrawWohnung(){
     const overlay2=h('div',{class:'modal-overlay'});
     const m2=h('div',{class:'modal'});
     m2.appendChild(h('h2',{},'Wohnung einzeichnen'));
-
-    // Neu-anlegen-Bereich
     const neuSection=h('div',{style:'margin-bottom:14px;border:1.5px dashed var(--line);border-radius:10px;padding:12px;'});
     neuSection.appendChild(h('div',{style:'font-size:12px;color:var(--muted);margin-bottom:8px;font-weight:600;'},'NEUE WOHNUNG ANLEGEN'));
     const neuInput=h('input',{type:'text',placeholder:'z. B. Wohnung 1, links …',style:'width:100%;padding:11px;font-size:15px;border:1.5px solid var(--line);border-radius:8px;margin-bottom:8px;box-sizing:border-box;'});
     neuSection.appendChild(neuInput);
     neuSection.appendChild(h('button',{class:'btn btn-primary',style:'width:100%;',onclick:()=>{
-      const name=neuInput.value.trim();
-      if(!name){ neuInput.focus(); return; }
+      const name=neuInput.value.trim(); if(!name){ neuInput.focus(); return; }
       const newAp={id:uid(),name,lueftung:{typ:'',wrg:false,abluftraeume:'',notiz:'',fotos:[]},rooms:[]};
-      fl.apartments.push(newAp);
-      save();
-      overlay2.remove();
+      fl.apartments.push(newAp); save(); overlay2.remove();
       const idx=fl.apartments.length-1;
       startDrawMode({typ:'wohnung',wohnungId:newAp.id,raumId:null,farbe:grundrissPolyColor(idx)});
     }},'+ Anlegen & einzeichnen'));
     m2.appendChild(neuSection);
-
-    // Bestehende Wohnungen
     if(fl.apartments.length>0){
       m2.appendChild(h('div',{style:'font-size:12px;color:var(--muted);margin-bottom:8px;font-weight:600;'},'BESTEHENDE WOHNUNG'));
       const sel=h('select',{style:'width:100%;padding:13px;font-size:16px;border:1.5px solid var(--line);border-radius:10px;margin-bottom:12px;'});
       fl.apartments.forEach((ap,i)=>sel.appendChild(h('option',{value:ap.id+'::'+i},ap.name)));
       m2.appendChild(sel);
       m2.appendChild(h('button',{class:'btn btn-outline',style:'width:100%;margin-bottom:8px;',onclick:()=>{
-        const [aid,idx]=sel.value.split('::');
-        overlay2.remove();
+        const [aid,idx]=sel.value.split('::'); overlay2.remove();
         startDrawMode({typ:'wohnung',wohnungId:aid,raumId:null,farbe:grundrissPolyColor(parseInt(idx))});
       }},'Einzeichnen'));
     }
-
     m2.appendChild(h('button',{class:'btn btn-ghost',style:'width:100%;',onclick:()=>overlay2.remove()},'Abbrechen'));
     overlay2.appendChild(m2); document.body.appendChild(overlay2);
     setTimeout(()=>neuInput.focus(),100);
@@ -998,37 +1024,24 @@ function renderGrundriss(){
     const overlay2=h('div',{class:'modal-overlay'});
     const m2=h('div',{class:'modal'});
     m2.appendChild(h('h2',{},'Raum einzeichnen'));
-
-    // Neu-anlegen-Bereich
     const neuSection=h('div',{style:'margin-bottom:14px;border:1.5px dashed var(--line);border-radius:10px;padding:12px;'});
     neuSection.appendChild(h('div',{style:'font-size:12px;color:var(--muted);margin-bottom:8px;font-weight:600;'},'NEUEN RAUM ANLEGEN'));
     const neuName=h('input',{type:'text',placeholder:'Raumname, z. B. Wohnzimmer',style:'width:100%;padding:11px;font-size:15px;border:1.5px solid var(--line);border-radius:8px;margin-bottom:8px;box-sizing:border-box;'});
     neuSection.appendChild(neuName);
-    // Wohnung-Auswahl für neuen Raum
     const neuAptSel=h('select',{style:'width:100%;padding:11px;font-size:15px;border:1.5px solid var(--line);border-radius:8px;margin-bottom:8px;'});
-    if(fl.apartments.length===0){
-      neuAptSel.appendChild(h('option',{value:''},'– erst Wohnungen anlegen –'));
-      neuAptSel.disabled=true;
-    } else {
-      fl.apartments.forEach((ap,i)=>neuAptSel.appendChild(h('option',{value:ap.id+'::'+i},ap.name)));
-    }
+    if(fl.apartments.length===0){ neuAptSel.appendChild(h('option',{value:''},'– erst Wohnungen anlegen –')); neuAptSel.disabled=true; }
+    else fl.apartments.forEach((ap,i)=>neuAptSel.appendChild(h('option',{value:ap.id+'::'+i},ap.name)));
     neuSection.appendChild(neuAptSel);
     neuSection.appendChild(h('button',{class:'btn btn-primary',style:'width:100%;',onclick:()=>{
-      const name=neuName.value.trim();
-      if(!name){ neuName.focus(); return; }
+      const name=neuName.value.trim(); if(!name){ neuName.focus(); return; }
       if(!neuAptSel.value){ toast('Bitte Wohnung wählen.'); return; }
       const [aid,ai]=neuAptSel.value.split('::');
-      const ap=fl.apartments.find(a=>a.id===aid);
-      if(!ap) return;
+      const ap=fl.apartments.find(a=>a.id===aid); if(!ap) return;
       const newRm={id:uid(),name,radiators:[],windows:[],feuchte:[],photos:[]};
-      ap.rooms.push(newRm);
-      save();
-      overlay2.remove();
+      ap.rooms.push(newRm); save(); overlay2.remove();
       startDrawMode({typ:'raum',wohnungId:aid,raumId:newRm.id,farbe:grundrissPolyColor(parseInt(ai))});
     }},'+ Anlegen & einzeichnen'));
     m2.appendChild(neuSection);
-
-    // Bestehende Räume
     const rooms=[];
     fl.apartments.forEach((ap,ai)=>ap.rooms.forEach((rm,ri)=>rooms.push({ap,rm,ai,ri})));
     if(rooms.length>0){
@@ -1037,12 +1050,10 @@ function renderGrundriss(){
       rooms.forEach(({ap,rm,ai,ri})=>sel.appendChild(h('option',{value:ap.id+'::'+rm.id+'::'+ai+'::'+ri},ap.name+' → '+rm.name)));
       m2.appendChild(sel);
       m2.appendChild(h('button',{class:'btn btn-outline',style:'width:100%;margin-bottom:8px;',onclick:()=>{
-        const [aid,rid,ai]=sel.value.split('::');
-        overlay2.remove();
+        const [aid,rid,ai]=sel.value.split('::'); overlay2.remove();
         startDrawMode({typ:'raum',wohnungId:aid,raumId:rid,farbe:grundrissPolyColor(parseInt(ai))});
       }},'Einzeichnen'));
     }
-
     m2.appendChild(h('button',{class:'btn btn-ghost',style:'width:100%;',onclick:()=>overlay2.remove()},'Abbrechen'));
     overlay2.appendChild(m2); document.body.appendChild(overlay2);
     setTimeout(()=>neuName.focus(),100);
@@ -1072,7 +1083,6 @@ function renderGrundriss(){
     });
   }
 
-  main.appendChild(layerBadge);
   main.appendChild(statusBar);
   main.appendChild(toolbar);
   main.appendChild(wrap);
@@ -1162,14 +1172,12 @@ function renderApartments(){
     const list=h('div',{class:'list'});
     fl.apartments.forEach(ap=>{
       const rc=ap.rooms.length;
-      list.appendChild(h('div',{class:'card tappable',onclick:()=>{nav.aptId=ap.id;nav.view='rooms';render();}},[
-        h('div',{class:'main'},[
-          h('div',{class:'name'},ap.name),
-          h('div',{class:'sub'},rc+' Raum'+(rc===1?'':'e'))
-        ]),
-        h('button',{class:'del-x',onclick:e=>{ e.stopPropagation(); confirmDelete('Wohnung „'+ap.name+'" löschen?',()=>{ fl.apartments=fl.apartments.filter(x=>x.id!==ap.id); save(); render(); }); }},'✕'),
-        h('div',{class:'chev'},'›')
-      ]));
+      const aptCard=h('div',{class:'card tappable',onclick:()=>{nav.aptId=ap.id;nav.view='rooms';render();}});
+      aptCard.appendChild(h('div',{class:'main'},[h('div',{class:'name'},ap.name),h('div',{class:'sub'},rc+' Raum'+(rc===1?'':'e'))]));
+      aptCard.appendChild(h('button',{class:'del-x',style:'color:var(--forest);',onclick:e=>{ e.stopPropagation(); promptText('Wohnung umbenennen','',n=>{ if(n){ap.name=n;save();render();} }); }},'✏'));
+      aptCard.appendChild(h('button',{class:'del-x',onclick:e=>{ e.stopPropagation(); confirmDelete('Wohnung „'+ap.name+'“ löschen?',()=>{ fl.apartments=fl.apartments.filter(x=>x.id!==ap.id); save(); render(); }); }},'✕'));
+      aptCard.appendChild(h('div',{class:'chev'},'›'));
+      list.appendChild(aptCard);
     });
     main.appendChild(list);
   }
@@ -1239,16 +1247,14 @@ function renderRooms(){
     main.appendChild(h('div',{class:'empty'},[h('div',{class:'big'},'🛋️'),h('p',{},'Noch keine Räume.')]));
   } else {
     const list=h('div',{class:'list'});
-    ap.rooms.forEach(rm=>{
+    [...ap.rooms].sort((a,b)=>a.name.localeCompare(b.name,'de')).forEach(rm=>{
       const hk=rm.radiators.length, fe=rm.windows.length, ph=(rm.photos||[]).length, ft=(rm.feuchte||[]).length;
-      list.appendChild(h('div',{class:'card tappable',onclick:()=>{nav.roomId=rm.id;nav.view='room';render();}},[
-        h('div',{class:'main'},[
-          h('div',{class:'name'},rm.name),
-          h('div',{class:'sub'},hk+' HK · '+fe+' FE'+(ph?' · '+ph+' Foto'+(ph===1?'':'s'):'')+(ft?' · ⚠️'+ft:''))
-        ]),
-        h('button',{class:'del-x',onclick:e=>{ e.stopPropagation(); confirmDelete('Raum „'+rm.name+'" löschen?',()=>{ ap.rooms=ap.rooms.filter(x=>x.id!==rm.id); save(); render(); }); }},'✕'),
-        h('div',{class:'chev'},'›')
-      ]));
+      const rmCard=h('div',{class:'card tappable',onclick:()=>{nav.roomId=rm.id;nav.view='room';render();}});
+      rmCard.appendChild(h('div',{class:'main'},[h('div',{class:'name'},rm.name),h('div',{class:'sub'},hk+' HK · '+fe+' FE'+(ph?' · '+ph+' Foto'+(ph===1?'':'s'):'')+(ft?' · ⚠️'+ft:''))]));
+      rmCard.appendChild(h('button',{class:'del-x',style:'color:var(--forest);',onclick:e=>{ e.stopPropagation(); promptText('Raum umbenennen','',n=>{ if(n){rm.name=n;save();render();} }); }},'✏'));
+      rmCard.appendChild(h('button',{class:'del-x',onclick:e=>{ e.stopPropagation(); confirmDelete('Raum „'+rm.name+'“ löschen?',()=>{ ap.rooms=ap.rooms.filter(x=>x.id!==rm.id); save(); render(); }); }},'✕'));
+      rmCard.appendChild(h('div',{class:'chev'},'›'));
+      list.appendChild(rmCard);
     });
     main.appendChild(list);
   }
