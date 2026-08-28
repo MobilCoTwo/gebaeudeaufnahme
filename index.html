@@ -456,6 +456,7 @@ function render(){
   if(nav.view==='heizungen') return renderHeizungen();
   if(nav.view==='floors') return renderFloors();
   if(nav.view==='grundriss') return renderGrundriss();
+  if(nav.view==='grundriss_uebersicht') return renderGrundrissUebersicht();
   if(nav.view==='huelle') return renderHuelle();
   if(nav.view==='apartments') return renderApartments();
   if(nav.view==='lueftung') return renderLueftung();
@@ -476,11 +477,12 @@ function header(title, crumb, showBack, showSettings){
 
 function goBack(){
   if(nav.view==='gebaeude'||nav.view==='heizungen') nav.view='floors';
-  else if(nav.view==='huelle'||nav.view==='grundriss') nav.view='floors';
+  else if(nav.view==='huelle'||nav.view==='grundriss') nav.view=nav.prevView||'floors';
+  else if(nav.view==='grundriss_uebersicht') nav.view='floors';
   else if(nav.view==='apartments') nav.view='floors';
   else if(nav.view==='lueftung') nav.view='apartments';
   else if(nav.view==='rooms') nav.view='apartments';
-  else if(nav.view==='room'){ nav.view='rooms'; nav.roomId=null; }
+  else if(nav.view==='room'){ if(nav.prevView==='grundriss_uebersicht'){nav.view='grundriss_uebersicht';nav.roomId=null;}else{nav.view='rooms';nav.roomId=null;} }
   else if(nav.view==='settings') nav.view='floors';
   render();
 }
@@ -635,6 +637,13 @@ function renderFloors(){
     h('div',{class:'main'},[h('div',{class:'name'},'🔥 Heizungsanlagen'),h('div',{class:'sub'},state.heizungsanlagen.length+' Anlage'+(state.heizungsanlagen.length===1?'':'n')+' erfasst')]),
     h('div',{class:'chev'},'›')
   ]));
+  const floorsWithGrundriss=state.floors.filter(fl=>fl.grundriss?.bild);
+  if(floorsWithGrundriss.length>0){
+    globalRow.appendChild(h('div',{class:'card tappable',onclick:()=>{nav.view='grundriss_uebersicht';render();}},[
+      h('div',{class:'main'},[h('div',{class:'name'},'📐 Grundrisse'),h('div',{class:'sub'},floorsWithGrundriss.length+' Grundriss'+(floorsWithGrundriss.length===1?'':' ('+floorsWithGrundriss.length+' Stockwerke)')+(floorsWithGrundriss.length===1?' · '+floorsWithGrundriss[0].name:''))]),
+      h('div',{class:'chev'},'›')
+    ]));
+  }
   main.appendChild(globalRow);
 
   main.appendChild(h('div',{class:'section-title'},'Stockwerke'));
@@ -930,7 +939,7 @@ function renderGrundriss(){
       popup.appendChild(h('div',{style:'font-size:12px;color:var(--muted);margin-bottom:6px;'},ap2?.name||''));
       popup.appendChild(h('div',{style:'font-size:12px;margin-bottom:10px;'},hk+' HK · '+fe+' FE'+(ph2?' · '+ph2+' Foto'+(ph2===1?'':'s'):'')+(ft?' · ⚠️'+ft:'')));
       popup.appendChild(h('div',{class:'btn-row',style:'gap:6px;'},[
-        h('button',{class:'btn btn-primary',style:'flex:1;padding:8px;font-size:13px;',onclick:()=>{ popup.remove(); nav.aptId=ap2.id; nav.roomId=rm2.id; nav.view='room'; render(); }},'Öffnen'),
+        h('button',{class:'btn btn-primary',style:'flex:1;padding:8px;font-size:13px;',onclick:()=>{ popup.remove(); nav.aptId=ap2.id; nav.roomId=rm2.id; nav.prevView=nav.view; nav.view='room'; render(); }},'Öffnen'),
         h('button',{class:'btn btn-ghost',style:'flex:0;padding:8px;font-size:13px;',onclick:()=>{ fl.grundriss.polygone=fl.grundriss.polygone.filter(p=>p.id!==poly.id); save(); popup.remove(); redraw(); }},'🗑')
       ]));
     }
@@ -1101,6 +1110,77 @@ function renderGrundriss(){
 
   // Initial draw after layout (need image to be rendered for viewBox)
   requestAnimationFrame(redraw);
+}
+
+function renderGrundrissUebersicht(){
+  header('Grundrisse', state.buildingName||'Gebäudeaufnahme', true, false);
+  const main=h('main');
+  const floorsWithGrundriss=sortFloors(state.floors).filter(fl=>fl.grundriss?.bild);
+  if(floorsWithGrundriss.length===0){
+    main.appendChild(h('div',{class:'empty'},[h('div',{class:'big'},'📐'),h('p',{},'Noch keine Grundrisse vorhanden. Stockwerk öffnen → Grundriss.')]));
+  } else {
+    floorsWithGrundriss.forEach(fl=>{
+      const sec=h('div',{style:'margin-bottom:24px;'});
+      sec.appendChild(h('div',{class:'section-title'},fl.name));
+      const wrap=h('div',{style:'position:relative;border-radius:12px;overflow:hidden;border:1px solid var(--line);margin-bottom:10px;background:#f8f7f2;cursor:pointer;'});
+      wrap.addEventListener('click',e=>{
+        if(e._raumClick) return; // Raumtext hat den Klick abgefangen
+        nav.floorId=fl.id; nav.prevView='grundriss_uebersicht'; nav.view='grundriss'; render();
+      });
+      wrap.appendChild(h('img',{src:fl.grundriss.bild,style:'width:100%;display:block;pointer-events:none;'}));
+      const svg=document.createElementNS('http://www.w3.org/2000/svg','svg');
+      svg.style.cssText='position:absolute;top:0;left:0;width:100%;height:100%;';
+      svg.setAttribute('viewBox','0 0 10000 10000');
+      svg.setAttribute('preserveAspectRatio','none');
+      const wohnungPolys=fl.grundriss.polygone.filter(p=>p.typ==='wohnung');
+      const raumPolys=fl.grundriss.polygone.filter(p=>p.typ==='raum');
+      [...wohnungPolys,...raumPolys].forEach(poly=>{
+        if(poly.punkte.length<2) return;
+        const pg=document.createElementNS('http://www.w3.org/2000/svg','polygon');
+        pg.setAttribute('points',poly.punkte.map(p=>`${p.x*10000} ${p.y*10000}`).join(' '));
+        pg.setAttribute('fill',poly.farbe+(poly.typ==='raum'?'55':'33'));
+        pg.setAttribute('stroke',poly.farbe);
+        pg.setAttribute('stroke-width',poly.typ==='raum'?'55':'90');
+        pg.setAttribute('stroke-linejoin','round');
+        pg.setAttribute('pointer-events','none');
+        svg.appendChild(pg);
+        if(poly.typ==='raum'){
+          const cx=poly.punkte.reduce((s,p)=>s+p.x,0)/poly.punkte.length;
+          const cy=poly.punkte.reduce((s,p)=>s+p.y,0)/poly.punkte.length;
+          let rmName='?', apId=null;
+          fl.apartments.forEach(ap=>{ if(ap.id===poly.wohnungId){ apId=ap.id; ap.rooms.forEach(rm=>{ if(rm.id===poly.raumId) rmName=rm.name; }); } });
+          const txt=document.createElementNS('http://www.w3.org/2000/svg','text');
+          txt.setAttribute('x',cx*10000); txt.setAttribute('y',cy*10000);
+          txt.setAttribute('text-anchor','middle'); txt.setAttribute('dominant-baseline','middle');
+          txt.setAttribute('fill',poly.farbe); txt.setAttribute('font-size','260');
+          txt.setAttribute('font-weight','700'); txt.setAttribute('font-family','-apple-system,BlinkMacSystemFont,sans-serif');
+          txt.setAttribute('paint-order','stroke'); txt.setAttribute('stroke','rgba(255,255,255,0.95)');
+          txt.setAttribute('stroke-width','100'); txt.setAttribute('pointer-events','all');
+          txt.textContent=rmName; txt.style.cursor='pointer';
+          txt.addEventListener('click',e=>{
+            e.stopPropagation();
+            e._raumClick=true; // Signal an wrap
+            const rm=fl.apartments.flatMap(a=>a.rooms).find(r=>r.id===poly.raumId);
+            if(rm&&apId){ nav.floorId=fl.id; nav.aptId=apId; nav.roomId=rm.id; nav.prevView='grundriss_uebersicht'; nav.view='room'; render(); }
+          });
+          svg.appendChild(txt);
+        }
+      });
+      wrap.appendChild(svg);
+      sec.appendChild(wrap);
+      const wohnungen=fl.apartments.filter(ap=>wohnungPolys.some(p=>p.wohnungId===ap.id));
+      if(wohnungen.length>0){
+        const row=h('div',{style:'display:flex;gap:8px;flex-wrap:wrap;margin-bottom:4px;'});
+        wohnungen.forEach(ap=>{
+          row.appendChild(h('button',{class:'btn btn-outline',style:'flex:1;font-size:13px;padding:8px;',
+            onclick:()=>{ nav.floorId=fl.id; nav.aptId=ap.id; nav.prevView='grundriss_uebersicht'; nav.view='grundriss'; render(); }},ap.name));
+        });
+        sec.appendChild(row);
+      }
+      main.appendChild(sec);
+    });
+  }
+  app.appendChild(main);
 }
 
 /* ===== GEBÄUDEHÜLLE ===== */
@@ -1425,14 +1505,28 @@ function renderSettings(){
     h('button',{class:'btn btn-outline',onclick:exportAllPhotos},'Alle Fotos exportieren')
   ]));
   main.appendChild(h('div',{class:'settings-panel'},[
-    h('h3',{},'Vollständiges Backup'),
-    h('p',{},'JSON-Datei mit allen Daten inkl. Fotos.'),
-    h('div',{class:'btn-row'},[
-      h('button',{class:'btn btn-outline',onclick:exportJSONBackup},'Backup speichern'),
-      h('label',{class:'btn btn-outline',style:'display:flex;align-items:center;justify-content:center;'},[
-        'Backup laden',
-        h('input',{type:'file',accept:'.json',style:'display:none;',onchange:e=>{ if(e.target.files[0]) importJSONBackup(e.target.files[0]); }})
-      ])
+    h('h3',{},'Datei-Export (OneDrive / Dateien)'),
+    h('p',{style:'font-size:13px;color:var(--muted);margin-bottom:12px;'},
+      'JSON-Datei mit allen Daten inkl. Fotos. Auf dem iPad: Export antippen → in Safari öffnet sich ein Download-Dialog → „In Dateien sichern" wählen → OneDrive-Ordner auswählen.'),
+    h('button',{class:'btn btn-primary',style:'width:100%;margin-bottom:8px;',onclick:()=>{
+      // iOS-freundlicher Export: öffnet Datei in neuem Tab damit Share-Sheet erscheint
+      const json=JSON.stringify(state,null,2);
+      const blob=new Blob([json],{type:'application/json'});
+      const url=URL.createObjectURL(blob);
+      const name=(state.buildingName||'Gebaeudeaufnahme').replace(/[^a-zA-Z0-9_-]/g,'_');
+      const date=new Date().toISOString().slice(0,10);
+      const a=document.createElement('a');
+      a.href=url; a.download=name+'_'+date+'.json';
+      a.style.display='none'; document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(()=>URL.revokeObjectURL(url),5000);
+      toast('Export gestartet – „In Dateien sichern" wählen');
+    }},'📤 Exportieren'),
+    h('div',{style:'border-top:1px solid var(--line);margin:12px 0;'}),
+    h('p',{style:'font-size:13px;color:var(--muted);margin-bottom:12px;'},
+      'Import: JSON-Backup-Datei aus OneDrive oder Dateien laden.'),
+    h('label',{class:'btn btn-outline',style:'width:100%;display:flex;align-items:center;justify-content:center;cursor:pointer;'},[
+      '📥 Importieren',
+      h('input',{type:'file',accept:'.json',style:'display:none;',onchange:e=>{ if(e.target.files[0]) importJSONBackup(e.target.files[0]); }})
     ])
   ]));
   main.appendChild(h('div',{class:'settings-panel'},[
