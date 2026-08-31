@@ -207,7 +207,7 @@ function dbSet(key,val){ return new Promise((res,rej)=>{ const t=db.transaction(
     }]
   }
 */
-let state = { buildingName:'', baujahr:'', gebäudetyp:'', geschosse:'', ngf:'', letzteSanierung:'', fotos:[], heizungsanlagen:[], floors:[] };
+let state = { buildingName:'', baujahr:'', gebäudetyp:'', geschosse:'', ngf:'', energietraeger:'', letzteSanierung:'', fotos:[], heizungsanlagen:[], floors:[] };
 let nav = { view:'floors', floorId:null, aptId:null, roomId:null, modal:null };
 
 const COMMON_ROOMS=['Wohnzimmer','Schlafzimmer','Küche','Bad','WC','Flur','Kinderzimmer','Arbeitszimmer','Abstellraum','Balkon','Esszimmer','Gäste-WC'];
@@ -219,7 +219,10 @@ const FEUCHTE_ARTEN=['Schimmel','Kondensat','Durchfeuchtung','Riss/Undichtigkeit
 const GEBÄUDETYPEN=['Einfamilienhaus','Doppelhaushälfte','Reihenhaus','Mehrfamilienhaus (≤4 WE)','Mehrfamilienhaus (>4 WE)','Nichtwohngebäude','Sonstige'];
 
 function uid(){ return Date.now().toString(36)+Math.random().toString(36).slice(2,7); }
-async function save(){ await dbSet('data', state); }
+async function save(){
+  try { await dbSet('data', state); }
+  catch(e){ console.error('Speicherfehler:',e); toast('⚠️ Speichern fehlgeschlagen!'); }
+}
 async function load(){
   const d = await dbGet('data');
   if(d){
@@ -230,6 +233,7 @@ async function load(){
     if(!state.geschosse) state.geschosse='';
     if(!state.ngf) state.ngf='';
     if(!state.letzteSanierung) state.letzteSanierung='';
+    if(!state.energietraeger) state.energietraeger='';
     if(!state.fotos) state.fotos=[];
     if(!state.heizungsanlagen) state.heizungsanlagen=[];
     state.floors.forEach(fl=>{
@@ -239,6 +243,7 @@ async function load(){
       ['wand','dach','keller'].forEach(k=>{ if(!fl.huelle[k]) fl.huelle[k]={}; if(!fl.huelle[k].fotos) fl.huelle[k].fotos=[]; });
       fl.apartments.forEach(ap=>{
         if(!ap.lueftung) ap.lueftung={typ:'',wrg:false,abluftraeume:'',notiz:'',fotos:[]};
+        if(!ap.fotos) ap.fotos=[];
         ap.rooms.forEach(rm=>{
           if(!rm.radiators) rm.radiators=[];
           if(!rm.windows) rm.windows=[];
@@ -268,20 +273,111 @@ function collectAptNames(){
 }
 
 /* ---------- Image compression ---------- */
-function compressImage(file){
+// Komprimierungsstufen: [maxDim, quality]
+const COMPRESS_LEVELS=[
+  [1280, 0.72],   // Standard
+  [1024, 0.60],   // Stufe 2 – bei Speicherproblemen
+  [800,  0.50],   // Stufe 3 – kompakter
+  [640,  0.40],   // Stufe 4 – Notfall
+];
+
+function compressImageAtLevel(file, level){
   return new Promise(resolve=>{
+    const [maxDim, quality]=COMPRESS_LEVELS[level]||COMPRESS_LEVELS[COMPRESS_LEVELS.length-1];
     const img=new Image(), reader=new FileReader();
     reader.onload=e=>{ img.src=e.target.result; };
     img.onload=()=>{
-      const maxDim=1280; let {width,height}=img;
-      if(width>height&&width>maxDim){height*=maxDim/width;width=maxDim;}
-      else if(height>=width&&height>maxDim){width*=maxDim/height;height=maxDim;}
+      let {width,height}=img;
+      if(width>height&&width>maxDim){height=Math.round(height*maxDim/width);width=maxDim;}
+      else if(height>=width&&height>maxDim){width=Math.round(width*maxDim/height);height=maxDim;}
       const c=document.createElement('canvas'); c.width=width; c.height=height;
       c.getContext('2d').drawImage(img,0,0,width,height);
-      resolve(c.toDataURL('image/jpeg',0.72));
+      resolve(c.toDataURL('image/jpeg',quality));
     };
     reader.readAsDataURL(file);
   });
+}
+
+function compressImage(file){ return compressImageAtLevel(file,0); }
+
+// Speichert state, bei QuotaExceeded werden Fotos stufenweise recomprimiert
+async function saveWithFallback(){
+  try {
+    await dbSet('data', state);
+    return;
+  } catch(e){
+    if(!isQuotaError(e)){ toast('⚠️ Speichern fehlgeschlagen!'); console.error(e); return; }
+  }
+  // Quota exceeded: Fotos recomprimieren
+  for(let lvl=1; lvl<COMPRESS_LEVELS.length; lvl++){
+    toast('⚠️ Speicher fast voll – Fotos werden verkleinert (Stufe '+lvl+') …');
+    await recompressAllPhotos(lvl);
+    try {
+      await dbSet('data', state);
+      toast('✅ Gespeichert (Fotos auf Stufe '+lvl+' verkleinert).');
+      return;
+    } catch(e){
+      if(!isQuotaError(e)){ toast('⚠️ Speichern fehlgeschlagen!'); console.error(e); return; }
+    }
+  }
+  toast('❌ Speicher voll – bitte zuerst einen Excel-Export machen und dann Daten löschen.');
+}
+
+function isQuotaError(e){
+  return e && (e.name==='QuotaExceededError'||e.name==='NS_ERROR_DOM_QUOTA_REACHED'||(e.message&&e.message.toLowerCase().includes('quota')));
+}
+
+async function recompressAllPhotos(level){
+  // Alle base64-Fotos im state neu komprimieren
+  const recomp = async (dataUrl) => {
+    if(!dataUrl||!dataUrl.startsWith('data:')) return dataUrl;
+    return new Promise(resolve=>{
+      const [maxDim,quality]=COMPRESS_LEVELS[level];
+      const img=new Image();
+      img.onload=()=>{
+        let {width,height}=img;
+        if(width>height&&width>maxDim){height=Math.round(height*maxDim/width);width=maxDim;}
+        else if(height>=width&&height>maxDim){width=Math.round(width*maxDim/height);height=maxDim;}
+        const c=document.createElement('canvas'); c.width=width; c.height=height;
+        c.getContext('2d').drawImage(img,0,0,width,height);
+        resolve(c.toDataURL('image/jpeg',quality));
+      };
+      img.onerror=()=>resolve(dataUrl);
+      img.src=dataUrl;
+    });
+  };
+  // Gebäudefotos
+  for(const f of (state.fotos||[])) if(f.foto) f.foto=await recomp(f.foto);
+  // Heizungsanlagen
+  for(const hz of (state.heizungsanlagen||[]))
+    for(const f of (hz.fotos||[])) if(f.foto) f.foto=await recomp(f.foto);
+  // Stockwerke
+  for(const fl of (state.floors||[])){
+    // Grundriss
+    if(fl.grundriss?.bild) fl.grundriss.bild=await recomp(fl.grundriss.bild);
+    // Hülle
+    for(const k of ['wand','dach','keller'])
+      for(const f of (fl.huelle?.[k]?.fotos||[])) if(f.foto) f.foto=await recomp(f.foto);
+    for(const ap of (fl.apartments||[])){
+      // Lüftung
+      for(const f of (ap.lueftung?.fotos||[])) if(f.foto) f.foto=await recomp(f.foto);
+      // Wohnungsfotos
+      for(const f of (ap.fotos||[])) if(f.foto) f.foto=await recomp(f.foto);
+      for(const rm of (ap.rooms||[])){
+        // Heizkörper
+        for(const hk of (rm.radiators||[])){
+          if(hk.fotoGanz) hk.fotoGanz=await recomp(hk.fotoGanz);
+          if(hk.fotoRohr) hk.fotoRohr=await recomp(hk.fotoRohr);
+        }
+        // Fenster
+        for(const fe of (rm.windows||[])) if(fe.foto) fe.foto=await recomp(fe.foto);
+        // Feuchte
+        for(const f of (rm.feuchte||[])) if(f.foto) f.foto=await recomp(f.foto);
+        // Raumfotos
+        for(const p of (rm.photos||[])) if(p.foto) p.foto=await recomp(p.foto);
+      }
+    }
+  }
 }
 
 /* ---------- Render helpers ---------- */
@@ -355,21 +451,70 @@ function photoField(label, onSet, existingUrl){
   return box;
 }
 
-function photoListSection(title, items, onAdd, onDelete){
+function photoListSection(title, items, onAdd, onDelete, tagOptions, onSave){
+  // tagOptions: array von verfügbaren Tags z.B. ['Berichtsfoto','Titelbild']
+  // Erstes Element mit tag==='Titelbild' wird als Titelbild behandelt
+  const TITLE_TAG='Titelbild';
   const wrap=h('div');
-  wrap.appendChild(h('div',{class:'section-title'},title+' ('+items.length+')'));
-  if(items.length===0) wrap.appendChild(h('p',{style:'color:var(--muted);font-size:14px;margin-bottom:8px;'},'Noch keine Fotos.'));
-  items.forEach((ph,idx)=>{
-    const card=h('div',{class:'itemcard'});
-    card.appendChild(h('div',{class:'head'},[
-      h('span',{class:'tag'},'Foto '+(idx+1)),
-      h('button',{class:'del-x',onclick:()=>onDelete(ph.id)},'✕')
-    ]));
-    if(ph.foto){ const tr=h('div',{class:'thumbrow'}); tr.appendChild(h('img',{src:ph.foto,style:'width:100%;height:auto;max-height:160px;object-fit:contain;border-radius:8px;'})); card.appendChild(tr); }
-    if(ph.notiz) card.appendChild(h('div',{class:'specs',style:'margin-top:6px;'},ph.notiz));
-    wrap.appendChild(card);
-  });
-  wrap.appendChild(h('button',{class:'btn btn-primary',style:'margin-bottom:4px;',onclick:onAdd},'📷 + Foto'));
+  function refresh(){
+    wrap.innerHTML='';
+    wrap.appendChild(h('div',{class:'section-title'},title+' ('+items.length+')'));
+    if(items.length===0) wrap.appendChild(h('p',{style:'color:var(--muted);font-size:14px;margin-bottom:8px;'},'Noch keine Fotos.'));
+    // Titelbild zuerst, dann Rest
+    const sorted=[...items].sort((a,b)=>{ if(a.tag===TITLE_TAG&&b.tag!==TITLE_TAG) return -1; if(b.tag===TITLE_TAG&&a.tag!==TITLE_TAG) return 1; return 0; });
+    sorted.forEach((ph,idx)=>{
+      const isTitel=ph.tag===TITLE_TAG;
+      const card=h('div',{class:'itemcard',style:isTitel?'border:2px solid var(--forest);background:#f0f7f4;':''});
+      const headRow=h('div',{class:'head'});
+      // Tag-Badges
+      const tagArea=h('div',{style:'display:flex;align-items:center;gap:6px;flex-wrap:wrap;flex:1;'});
+      if(isTitel){
+        tagArea.appendChild(h('span',{class:'tag',style:'background:var(--forest);color:#fff;font-size:12px;'},'⭐ Titelbild'));
+      } else {
+        tagArea.appendChild(h('span',{class:'tag'},'Foto '+(idx+1)));
+        if(ph.tag) tagArea.appendChild(h('span',{class:'tag',style:'background:#555;color:#fff;font-size:11px;'},ph.tag));
+      }
+      headRow.appendChild(tagArea);
+      const btnArea=h('div',{style:'display:flex;gap:4px;align-items:center;'});
+      if(tagOptions&&tagOptions.length){
+        const allOpts=[{label:'(kein Tag)',value:''},...tagOptions.map(t=>({label:t,value:t}))];
+        const tagBtn=h('button',{class:'del-x',style:'color:var(--forest);font-size:14px;',onclick:()=>{
+          const ov=h('div',{class:'modal-overlay'});
+          const mm=h('div',{class:'modal'});
+          mm.appendChild(h('h2',{},'Tag setzen'));
+          allOpts.forEach(opt=>{
+            mm.appendChild(h('button',{
+              class:'btn '+(ph.tag===(opt.value||undefined)?'btn-primary':'btn-outline'),
+              style:'margin-bottom:8px;',
+              onclick:()=>{
+                // Titelbild: altes Titelbild entfernen (nur eins erlaubt)
+                if(opt.value===TITLE_TAG){
+                  items.forEach(x=>{ if(x.tag===TITLE_TAG) x.tag=undefined; });
+                }
+                ph.tag=opt.value||undefined;
+                if(onSave) onSave();
+                ov.remove(); refresh();
+              }
+            },opt.value===TITLE_TAG?'⭐ '+opt.label:opt.label));
+          });
+          mm.appendChild(h('button',{class:'btn btn-ghost',onclick:()=>ov.remove()},'Abbrechen'));
+          ov.appendChild(mm); document.body.appendChild(ov);
+        }},'🏷');
+        btnArea.appendChild(tagBtn);
+      }
+      btnArea.appendChild(h('button',{class:'del-x',onclick:()=>{ onDelete(ph.id); refresh(); }},'✕'));
+      headRow.appendChild(btnArea);
+      card.appendChild(headRow);
+      if(ph.foto){
+        const img=h('img',{src:ph.foto,style:'width:100%;height:auto;max-height:'+(isTitel?'220':'160')+'px;object-fit:cover;border-radius:8px;margin-top:8px;'});
+        card.appendChild(img);
+      }
+      if(ph.notiz) card.appendChild(h('div',{class:'specs',style:'margin-top:6px;'},ph.notiz));
+      wrap.appendChild(card);
+    });
+    wrap.appendChild(h('button',{class:'btn btn-primary',style:'margin-bottom:4px;',onclick:onAdd},'📷 + Foto'));
+  }
+  refresh();
   return wrap;
 }
 
@@ -510,9 +655,11 @@ function renderGebaeude(){
         m.appendChild(photoField('Foto',u=>d.foto=u));
         m.appendChild(fieldGroup([{key:'notiz',label:'Notiz',type:'textarea',placeholder:'z. B. Nordansicht, Straßenfassade …'}],d));
         return null;
-      }, ()=>{ if(!d.foto){toast('Kein Foto.');return false;} draft.fotos.push({id:uid(),...d}); return true; });
+      }, ()=>{ if(!d.foto){toast('Kein Foto.');return false;} draft.fotos.push({id:uid(),...d}); Object.assign(state,draft); saveWithFallback(); return true; });
     },
-    id=>{ draft.fotos=draft.fotos.filter(x=>x.id!==id); }
+    id=>{ draft.fotos=draft.fotos.filter(x=>x.id!==id); Object.assign(state,draft); saveWithFallback(); },
+    ['Titelbild','Berichtsfoto'],
+    ()=>{ Object.assign(state,draft); saveWithFallback(); }
   ));
 
   main.appendChild(h('div',{class:'addbar'},[
@@ -1102,7 +1249,7 @@ function renderGrundriss(){
     h('input',{type:'file',accept:'image/*',style:'display:none;',onchange:async e=>{
       const file=e.target.files[0]; if(!file) return;
       if(!confirm('Grundriss ersetzen? Alle Polygone bleiben erhalten.')) return;
-      fl.grundriss.bild=await compressImage(file); await save(); render();
+      fl.grundriss.bild=await compressImage(file); await saveWithFallback(); render();
     }})
   ]));
 
@@ -1195,7 +1342,7 @@ function renderHuelle(){
     if(!fl.huelle[k]) fl.huelle[k]={fotos:[]};
     if(!fl.huelle[k].fotos) fl.huelle[k].fotos=[];
     const sec=fl.huelle[k];
-    const draft={...sec};
+    const draft={...sec, fotos:[...(sec.fotos||[])]};
     main.appendChild(h('div',{class:'section-title'},labels[k]));
     main.appendChild(fieldGroup([
       {key:'aufbau',label:'Aufbau / Konstruktion',type:'textarea',placeholder:'z. B. Mauerwerk 30 cm, Putz …'},
@@ -1213,9 +1360,9 @@ function renderHuelle(){
         ()=>{
           let d2={foto:null,notiz:''};
           modal('Foto '+(labels[k]),m2=>{ m2.appendChild(photoField('Foto',u=>d2.foto=u)); m2.appendChild(fieldGroup([{key:'notiz',label:'Notiz',type:'textarea',placeholder:'z. B. Detailansicht, Kernbohrung …'}],d2)); return null; },
-          ()=>{ if(!d2.foto){toast('Kein Foto.');return false;} if(!draft.fotos) draft.fotos=[]; draft.fotos.push({id:uid(),...d2}); Object.assign(fl.huelle[k],draft); save(); refreshF(); return true; });
+          ()=>{ if(!d2.foto){toast('Kein Foto.');return false;} if(!draft.fotos) draft.fotos=[]; draft.fotos.push({id:uid(),...d2}); Object.assign(fl.huelle[k],draft); saveWithFallback(); refreshF(); return true; });
         },
-        id=>{ draft.fotos=(draft.fotos||[]).filter(x=>x.id!==id); Object.assign(fl.huelle[k],draft); save(); refreshF(); }
+        id=>{ draft.fotos=(draft.fotos||[]).filter(x=>x.id!==id); Object.assign(fl.huelle[k],draft); saveWithFallback(); refreshF(); }
       ));
     };
     refreshF();
@@ -1294,8 +1441,8 @@ function renderLueftung(){
   const refreshF=()=>{
     fotoWrap.innerHTML='';
     fotoWrap.appendChild(photoListSection('Fotos',draft.fotos||[],
-      ()=>{ let d2={foto:null,notiz:''}; modal('Foto Lüftung',m2=>{ m2.appendChild(photoField('Foto',u=>d2.foto=u)); m2.appendChild(fieldGroup([{key:'notiz',label:'Notiz',type:'textarea',placeholder:''}],d2)); return null; }, ()=>{ if(!d2.foto){toast('Kein Foto.');return false;} draft.fotos.push({id:uid(),...d2}); ap.lueftung=JSON.parse(JSON.stringify(draft)); save(); refreshF(); return true; }); },
-      id=>{ draft.fotos=draft.fotos.filter(x=>x.id!==id); ap.lueftung=JSON.parse(JSON.stringify(draft)); save(); refreshF(); }
+      ()=>{ let d2={foto:null,notiz:''}; modal('Foto Lüftung',m2=>{ m2.appendChild(photoField('Foto',u=>d2.foto=u)); m2.appendChild(fieldGroup([{key:'notiz',label:'Notiz',type:'textarea',placeholder:''}],d2)); return null; }, ()=>{ if(!d2.foto){toast('Kein Foto.');return false;} draft.fotos.push({id:uid(),...d2}); ap.lueftung=JSON.parse(JSON.stringify(draft)); saveWithFallback(); refreshF(); return true; }); },
+      id=>{ draft.fotos=draft.fotos.filter(x=>x.id!==id); ap.lueftung=JSON.parse(JSON.stringify(draft)); saveWithFallback(); refreshF(); }
     ));
   };
   refreshF();
@@ -1321,6 +1468,21 @@ function renderRooms(){
       h('div',{class:'chev'},'›')
     ])
   ]));
+
+  // Wohnungsfotos
+  if(!ap.fotos) ap.fotos=[];
+  const aptFotoWrap=h('div');
+  const refreshAptFotos=()=>{
+    aptFotoWrap.innerHTML='';
+    aptFotoWrap.appendChild(photoListSection('Wohnungsfotos', ap.fotos,
+      ()=>{ let d={foto:null,notiz:''}; modal('Wohnungsfoto',m=>{ m.appendChild(photoField('Foto',u=>d.foto=u)); m.appendChild(fieldGroup([{key:'notiz',label:'Notiz',type:'textarea',placeholder:'z. B. Eingangsbereich, Treppenhaus …'}],d)); return null; },()=>{ if(!d.foto){toast('Kein Foto.');return false;} ap.fotos.push({id:uid(),...d}); saveWithFallback(); refreshAptFotos(); return true; }); },
+      id=>{ ap.fotos=ap.fotos.filter(x=>x.id!==id); saveWithFallback(); refreshAptFotos(); },
+      ['Titelbild','Eingang','Berichtsfoto'],
+      ()=>saveWithFallback()
+    ));
+  };
+  refreshAptFotos();
+  main.appendChild(aptFotoWrap);
 
   main.appendChild(h('div',{class:'section-title'},'Räume'));
   if(ap.rooms.length===0){
@@ -1361,7 +1523,16 @@ function renderRoom(){
   if(rm.radiators.length===0) main.appendChild(h('p',{style:'color:var(--muted);font-size:14px;'},'Noch keine Heizkörper erfasst.'));
   rm.radiators.forEach((hk,idx)=>{
     const card=h('div',{class:'itemcard'});
-    card.appendChild(h('div',{class:'head'},[h('span',{class:'tag'},'HK '+(idx+1)),h('button',{class:'del-x',onclick:()=>confirmDelete('HK löschen?',()=>{ rm.radiators=rm.radiators.filter(x=>x.id!==hk.id); save(); render(); })},'✕')]));
+    const hkHead=h('div',{class:'head'});
+    // Tag + Raum-Zuweisung Info
+    const hkTagArea=h('div',{style:'display:flex;align-items:center;gap:6px;flex:1;'});
+    hkTagArea.appendChild(h('span',{class:'tag'},'HK '+(idx+1)));
+    hkHead.appendChild(hkTagArea);
+    const hkBtns=h('div',{style:'display:flex;gap:4px;'});
+    hkBtns.appendChild(h('button',{class:'del-x',style:'color:var(--forest);font-size:14px;',onclick:()=>openRadiatorForm(rm,hk)},'✏'));
+    hkBtns.appendChild(h('button',{class:'del-x',onclick:()=>confirmDelete('HK löschen?',()=>{ rm.radiators=rm.radiators.filter(x=>x.id!==hk.id); save(); render(); })},'✕'));
+    hkHead.appendChild(hkBtns);
+    card.appendChild(hkHead);
     card.appendChild(h('div',{class:'specs'},hk.typ+(hk.anzahl?' ('+hk.anzahl+'x)':'')+' · '+hk.hoehe+'×'+hk.breite+'×'+hk.tiefe+' mm · Ø '+hk.rohr+' mm'));
     const tr=h('div',{class:'thumbrow'}); if(hk.fotoGanz) tr.appendChild(h('img',{src:hk.fotoGanz})); if(hk.fotoRohr) tr.appendChild(h('img',{src:hk.fotoRohr})); if(tr.children.length) card.appendChild(tr);
     main.appendChild(card);
@@ -1373,7 +1544,13 @@ function renderRoom(){
   if(rm.windows.length===0) main.appendChild(h('p',{style:'color:var(--muted);font-size:14px;'},'Noch keine Fenster erfasst.'));
   rm.windows.forEach((fe,idx)=>{
     const card=h('div',{class:'itemcard'});
-    card.appendChild(h('div',{class:'head'},[h('span',{class:'tag'},'Fenster '+(idx+1)),h('button',{class:'del-x',onclick:()=>confirmDelete('Fenster löschen?',()=>{ rm.windows=rm.windows.filter(x=>x.id!==fe.id); save(); render(); })},'✕')]));
+    const feHead=h('div',{class:'head'});
+    feHead.appendChild(h('span',{class:'tag',style:'flex:1;'},'Fenster '+(idx+1)));
+    const feBtns=h('div',{style:'display:flex;gap:4px;'});
+    feBtns.appendChild(h('button',{class:'del-x',style:'color:var(--forest);font-size:14px;',onclick:()=>openWindowForm(rm,fe)},'✏'));
+    feBtns.appendChild(h('button',{class:'del-x',onclick:()=>confirmDelete('Fenster löschen?',()=>{ rm.windows=rm.windows.filter(x=>x.id!==fe.id); save(); render(); })},'✕'));
+    feHead.appendChild(feBtns);
+    card.appendChild(feHead);
     card.appendChild(h('div',{class:'specs'},[(fe.verglasung||'Verglasung: ?'),' · ',(fe.rahmen||'Rahmen: ?'),(fe.baujahr?' · Bj. '+fe.baujahr:''),h('br'),(fe.zustand?'Zustand: '+fe.zustand:''),(fe.notiz?' – '+fe.notiz:'')]));
     if(fe.foto){ const tr=h('div',{class:'thumbrow'}); tr.appendChild(h('img',{src:fe.foto})); card.appendChild(tr); }
     main.appendChild(card);
@@ -1396,45 +1573,84 @@ function renderRoom(){
   main.appendChild(h('button',{class:'btn btn-outline',style:'margin-bottom:8px;',onclick:()=>openFeuchteForm(rm)},'⚠️ + Feuchte/Schaden'));
 
   /* --- Raumfotos --- */
-  main.appendChild(h('div',{class:'section-title'},'Raumfotos ('+rm.photos.length+')'));
-  if(rm.photos.length===0) main.appendChild(h('p',{style:'color:var(--muted);font-size:14px;'},'Noch keine Fotos erfasst.'));
-  rm.photos.forEach((ph,idx)=>{
-    const card=h('div',{class:'itemcard'});
-    card.appendChild(h('div',{class:'head'},[h('span',{class:'tag'},'Foto '+(idx+1)),h('button',{class:'del-x',onclick:()=>confirmDelete('Foto löschen?',()=>{ rm.photos=rm.photos.filter(x=>x.id!==ph.id); save(); render(); })},'✕')]));
-    if(ph.foto){ const tr=h('div',{class:'thumbrow'}); tr.appendChild(h('img',{src:ph.foto,style:'width:100%;height:auto;max-height:160px;object-fit:contain;border-radius:8px;'})); card.appendChild(tr); }
-    if(ph.notiz) card.appendChild(h('div',{class:'specs',style:'margin-top:6px;'},ph.notiz));
-    main.appendChild(card);
-  });
-  main.appendChild(h('button',{class:'btn btn-primary',style:'margin-top:4px;',onclick:()=>openRoomPhotoForm(rm)},'📷 + Foto'));
+  const rmFotoWrap=h('div');
+  const refreshRmFotos=()=>{
+    rmFotoWrap.innerHTML='';
+    rmFotoWrap.appendChild(photoListSection('Raumfotos', rm.photos||[],
+      ()=>openRoomPhotoForm(rm, ()=>{ save(); refreshRmFotos(); }),
+      id=>{ rm.photos=rm.photos.filter(x=>x.id!==id); saveWithFallback(); refreshRmFotos(); },
+      ['Titelbild','Übersichtsfoto','Berichtsfoto'],
+      ()=>saveWithFallback()
+    ));
+  };
+  refreshRmFotos();
+  main.appendChild(rmFotoWrap);
 
   app.appendChild(main);
 }
 
-/* --- Heizkörper Modal --- */
-function openRadiatorForm(rm){
-  const draft={hoehe:'',breite:'',tiefe:'',typ:TYPEN_HK[0],anzahl:'',rohr:'',fotoGanz:null,fotoRohr:null};
-  modal('Neuer Heizkörper', m=>{
+/* --- Heizkörper Modal (Neu + Bearbeiten) --- */
+function openRadiatorForm(rm, existing){
+  const isEdit=!!existing;
+  const draft=isEdit?{...existing}:{hoehe:'',breite:'',tiefe:'',typ:TYPEN_HK[0],anzahl:'',rohr:'',fotoGanz:null,fotoRohr:null};
+  modal((isEdit?'Heizkörper bearbeiten':'Neuer Heizkörper'), m=>{
     m.appendChild(h('div',{class:'grid3'},[
-      ...['hoehe','breite','tiefe'].map((k,i)=>h('div',{class:'field'},[h('label',{},['Höhe','Breite','Tiefe'][i]+' (mm)'),h('input',{type:'number',inputmode:'numeric',placeholder:'—',oninput:e=>draft[k]=e.target.value})]))
+      ...['hoehe','breite','tiefe'].map((k,i)=>{
+        const inp=h('input',{type:'number',inputmode:'numeric',placeholder:'—',oninput:e=>draft[k]=e.target.value});
+        inp.value=draft[k]||'';
+        return h('div',{class:'field'},[h('label',{},['Höhe','Breite','Tiefe'][i]+' (mm)'),inp]);
+      })
     ]));
     m.appendChild(fieldGroup([
       {key:'typ',label:'Typ',type:'select',options:TYPEN_HK},
       {key:'anzahl',label:'Anzahl (Rippen/Glieder)',type:'number',placeholder:'optional'},
       {key:'rohr',label:'Rohrdurchmesser (mm)',type:'number',placeholder:'z. B. 15'},
     ],draft));
-    m.appendChild(photoField('Foto: ganzer Heizkörper',u=>draft.fotoGanz=u));
-    m.appendChild(photoField('Foto: Rohranschluss',u=>draft.fotoRohr=u));
+    // Raum-Zuweisung (immer sichtbar)
+    {
+      const allRooms=[];
+      state.floors.forEach(fl=>fl.apartments.forEach(ap=>ap.rooms.forEach(r=>allRooms.push({fl,ap,r}))));
+      const raumSel=h('select',{style:'width:100%;padding:11px;font-size:15px;border:1.5px solid var(--line);border-radius:8px;'});
+      allRooms.forEach(({fl,ap,r})=>{
+        const opt=h('option',{value:r.id},fl.name+' / '+ap.name+' / '+r.name);
+        if(r.id===rm.id) opt.selected=true;
+        raumSel.appendChild(opt);
+      });
+      draft._newRoomId=rm.id;
+      raumSel.addEventListener('change',e=>draft._newRoomId=e.target.value);
+      m.appendChild(h('div',{class:'field'},[h('label',{},'Raum zuweisen'),raumSel]));
+    }
+    m.appendChild(photoField('Foto: ganzer Heizkörper',u=>draft.fotoGanz=u,draft.fotoGanz));
+    m.appendChild(photoField('Foto: Rohranschluss',u=>draft.fotoRohr=u,draft.fotoRohr));
     return null;
   }, ()=>{
     if(!draft.hoehe||!draft.breite||!draft.tiefe){toast('Bitte Maße eingeben.');return false;}
-    rm.radiators.push({id:uid(),...draft}); save(); render(); return true;
-  });
+    if(isEdit){
+      if(draft._newRoomId && draft._newRoomId!==rm.id){
+        // In anderen Raum verschieben
+        rm.radiators=rm.radiators.filter(x=>x.id!==existing.id);
+        const newRm=state.floors.flatMap(f=>f.apartments).flatMap(a=>a.rooms).find(r=>r.id===draft._newRoomId);
+        if(newRm){ const {_newRoomId,...hkData}=draft; newRm.radiators.push(hkData); }
+      } else {
+        const {_newRoomId,...hkData}=draft;
+        Object.assign(existing,hkData);
+      }
+    } else {
+      // Neu anlegen: ggf. direkt in gewählten Raum
+      const targetRm = draft._newRoomId && draft._newRoomId!==rm.id
+        ? state.floors.flatMap(f=>f.apartments).flatMap(a=>a.rooms).find(r=>r.id===draft._newRoomId)
+        : rm;
+      if(targetRm){ const {_newRoomId,...hkData}=draft; targetRm.radiators.push({id:uid(),...hkData}); }
+    }
+    saveWithFallback(); render(); return true;
+  }, isEdit?'Speichern':undefined);
 }
 
-/* --- Fenster Modal --- */
-function openWindowForm(rm){
-  const draft={verglasung:VERGLASUNG[0],rahmen:RAHMEN[0],baujahr:'',zustand:'',notiz:'',foto:null};
-  modal('Neues Fenster', m=>{
+/* --- Fenster Modal (Neu + Bearbeiten) --- */
+function openWindowForm(rm, existing){
+  const isEdit=!!existing;
+  const draft=isEdit?{...existing}:{verglasung:VERGLASUNG[0],rahmen:RAHMEN[0],baujahr:'',zustand:'',notiz:'',foto:null};
+  modal((isEdit?'Fenster bearbeiten':'Neues Fenster'), m=>{
     m.appendChild(fieldGroup([
       {key:'verglasung',label:'Verglasung',type:'select',options:VERGLASUNG},
       {key:'rahmen',label:'Rahmenmaterial',type:'select',options:RAHMEN},
@@ -1442,9 +1658,42 @@ function openWindowForm(rm){
       {key:'zustand',label:'Zustand Dichtungen',type:'select',options:['—','gut','mittel','schlecht','defekt']},
       {key:'notiz',label:'Notiz',type:'textarea',placeholder:'z. B. Maße, Besonderheiten …'},
     ],draft));
-    m.appendChild(photoField('Foto Fenster',u=>draft.foto=u));
+    // Raum-Zuweisung (immer sichtbar)
+    {
+      const allRooms=[];
+      state.floors.forEach(fl=>fl.apartments.forEach(ap=>ap.rooms.forEach(r=>allRooms.push({fl,ap,r}))));
+      const raumSel=h('select',{style:'width:100%;padding:11px;font-size:15px;border:1.5px solid var(--line);border-radius:8px;'});
+      allRooms.forEach(({fl,ap,r})=>{
+        const opt=h('option',{value:r.id},fl.name+' / '+ap.name+' / '+r.name);
+        if(r.id===rm.id) opt.selected=true;
+        raumSel.appendChild(opt);
+      });
+      draft._newRoomId=rm.id;
+      raumSel.addEventListener('change',e=>draft._newRoomId=e.target.value);
+      m.appendChild(h('div',{class:'field'},[h('label',{},'Raum zuweisen'),raumSel]));
+    }
+    m.appendChild(photoField('Foto Fenster',u=>draft.foto=u,draft.foto));
     return null;
-  }, ()=>{ rm.windows.push({id:uid(),...draft}); save(); render(); return true; });
+  }, ()=>{
+    if(isEdit){
+      if(draft._newRoomId && draft._newRoomId!==rm.id){
+        // In anderen Raum verschieben
+        rm.windows=rm.windows.filter(x=>x.id!==existing.id);
+        const newRm=state.floors.flatMap(f=>f.apartments).flatMap(a=>a.rooms).find(r=>r.id===draft._newRoomId);
+        if(newRm){ const {_newRoomId,...feData}=draft; newRm.windows.push(feData); }
+      } else {
+        const {_newRoomId,...feData}=draft;
+        Object.assign(existing,feData);
+      }
+    } else {
+      // Neu anlegen: ggf. direkt in gewählten Raum
+      const targetRm = draft._newRoomId && draft._newRoomId!==rm.id
+        ? state.floors.flatMap(f=>f.apartments).flatMap(a=>a.rooms).find(r=>r.id===draft._newRoomId)
+        : rm;
+      if(targetRm){ const {_newRoomId,...feData}=draft; targetRm.windows.push({id:uid(),...feData}); }
+    }
+    saveWithFallback(); render(); return true;
+  }, isEdit?'Speichern':undefined);
 }
 
 /* --- Feuchte Modal --- */
@@ -1457,17 +1706,17 @@ function openFeuchteForm(rm){
     ],draft));
     m.appendChild(photoField('Foto',u=>draft.foto=u));
     return null;
-  }, ()=>{ rm.feuchte.push({id:uid(),...draft}); save(); render(); return true; });
+  }, ()=>{ rm.feuchte.push({id:uid(),...draft}); saveWithFallback(); render(); return true; });
 }
 
 /* --- Raumfoto Modal --- */
-function openRoomPhotoForm(rm){
+function openRoomPhotoForm(rm, onDone){
   const draft={foto:null,notiz:''};
   modal('Raumfoto', m=>{
     m.appendChild(photoField('Foto',u=>draft.foto=u));
     m.appendChild(fieldGroup([{key:'notiz',label:'Notiz (optional)',type:'textarea',placeholder:'z. B. Schimmelstelle, Riss, Besonderheit …'}],draft));
     return null;
-  }, ()=>{ if(!draft.foto){toast('Bitte Foto aufnehmen.');return false;} rm.photos.push({id:uid(),...draft}); save(); render(); return true; });
+  }, ()=>{ if(!draft.foto){toast('Bitte Foto aufnehmen.');return false;} rm.photos.push({id:uid(),...draft}); saveWithFallback(); if(onDone) onDone(); else render(); return true; });
 }
 
 /* ===== SETTINGS ===== */
@@ -1523,11 +1772,27 @@ function renderSettings(){
     }},'📤 Exportieren'),
     h('div',{style:'border-top:1px solid var(--line);margin:12px 0;'}),
     h('p',{style:'font-size:13px;color:var(--muted);margin-bottom:12px;'},
-      'Import: JSON-Backup-Datei aus OneDrive oder Dateien laden.'),
-    h('label',{class:'btn btn-outline',style:'width:100%;display:flex;align-items:center;justify-content:center;cursor:pointer;'},[
-      '📥 Importieren',
-      h('input',{type:'file',accept:'.json',style:'display:none;',onchange:e=>{ if(e.target.files[0]) importJSONBackup(e.target.files[0]); }})
-    ])
+      'JSON-Backup hier hineinziehen oder antippen zum Auswählen.'),
+    (()=>{
+      const inp=h('input',{type:'file',accept:'.json',style:'display:none;',onchange:e=>{ if(e.target.files[0]) importJSONBackup(e.target.files[0]); }});
+      const zone=h('div',{
+        style:'border:2px dashed var(--forest);border-radius:12px;padding:28px 16px;text-align:center;cursor:pointer;background:#f7fbfa;transition:background .15s;',
+        onclick:()=>inp.click()
+      },[
+        h('div',{style:'font-size:32px;margin-bottom:8px;'},'📥'),
+        h('div',{style:'font-size:15px;font-weight:700;color:var(--forest);margin-bottom:4px;'},'Backup hier hineinziehen'),
+        h('div',{style:'font-size:13px;color:var(--muted);'},'oder antippen zum Auswählen')
+      ]);
+      zone.appendChild(inp);
+      zone.addEventListener('dragover',e=>{ e.preventDefault(); zone.style.background='#dff0ea'; });
+      zone.addEventListener('dragleave',()=>{ zone.style.background='#f7fbfa'; });
+      zone.addEventListener('drop',e=>{
+        e.preventDefault(); zone.style.background='#f7fbfa';
+        const file=e.dataTransfer&&e.dataTransfer.files&&e.dataTransfer.files[0];
+        if(file) importJSONBackup(file);
+      });
+      return zone;
+    })()
   ]));
   main.appendChild(h('div',{class:'settings-panel'},[
     h('h3',{},'Neues Gebäude'),
@@ -1748,6 +2013,7 @@ function importJSONBackup(file){
       const parsed=JSON.parse(e.target.result);
       if(!parsed.floors) throw new Error('ungültig');
       if(parsed.buildingName===undefined) parsed.buildingName='';
+      if(!parsed.energietraeger) parsed.energietraeger='';
       if(!parsed.fotos) parsed.fotos=[];
       if(!parsed.heizungsanlagen) parsed.heizungsanlagen=[];
       parsed.floors.forEach(fl=>{
@@ -1757,6 +2023,7 @@ function importJSONBackup(file){
         ['wand','dach','keller'].forEach(k=>{ if(!fl.huelle[k]) fl.huelle[k]={}; if(!fl.huelle[k].fotos) fl.huelle[k].fotos=[]; });
         fl.apartments.forEach(ap=>{
           if(!ap.lueftung) ap.lueftung={typ:'',wrg:false,abluftraeume:'',notiz:'',fotos:[]};
+          if(!ap.fotos) ap.fotos=[];
           ap.rooms.forEach(rm=>{
             if(!rm.radiators) rm.radiators=[];
             if(!rm.windows) rm.windows=[];
